@@ -61,7 +61,7 @@ npm.cmd run build
 
 提交前可运行 `npm.cmd run check`，顺序执行单元测试与生产构建；GitHub Actions 使用相同命令。CI 配置已提供，远端运行结果以实际上传后的 Actions 记录为准。
 
-本轮 AI 协作过程、关键决策和面试展示路径见 [docs/AI_WORKFLOW.md](docs/AI_WORKFLOW.md)。新增的同条件拖拽 / 平移对比见 [docs/performance/COMPARISON.md](docs/performance/COMPARISON.md)。
+本轮 AI 协作过程、关键决策和展示路径见 [docs/AI_WORKFLOW.md](docs/AI_WORKFLOW.md)。新增的同条件拖拽 / 平移对比见 [docs/performance/COMPARISON.md](docs/performance/COMPARISON.md)。
 
 另提供 Playwright 完整检查脚本，在可启动 Edge 的普通终端中运行：
 
