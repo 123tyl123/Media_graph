@@ -1,0 +1,29 @@
+{
+  "measuredAt": "2026-10-14T08:52:06.792Z",
+  "runtime": "v22.22.3",
+  "cpu": "12th Gen Intel(R) Core(TM) i7-12700H",
+  "note": "Node.js pure data/model benchmark only. Does not measure browser rendering, IndexedDB, media decode or interaction FPS.",
+  "samples": [
+    {
+      "count": 100,
+      "edges": 99,
+      "runs": 10,
+      "generationTopologyOverviewMedianMs": 0.2,
+      "overviewNodes": 31
+    },
+    {
+      "count": 1000,
+      "edges": 999,
+      "runs": 10,
+      "generationTopologyOverviewMedianMs": 2.03,
+      "overviewNodes": 31
+    },
+    {
+      "count": 10000,
+      "edges": 9999,
+      "runs": 10,
+      "generationTopologyOverviewMedianMs": 11.66,
+      "overviewNodes": 31
+    }
+  ]
+}
