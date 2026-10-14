@@ -57,7 +57,11 @@ node scripts/model-benchmark.mjs
 npm.cmd run build
 ```
 
-14 项自动检查覆盖生成计数、层级、连线约束、聚合计数、数据替换、保存恢复、并发队列和失败后重试。IndexedDB 单元检查使用 fake-indexeddb，不能代替真实浏览器验收。
+42 项自动检查覆盖生成计数、层级、连线约束、聚合计数、数据替换、保存恢复、并发队列、失败后重试、成功写入期间的新编辑，以及损坏记录隔离。IndexedDB 单元检查使用 fake-indexeddb，不能代替真实浏览器验收。
+
+提交前可运行 `npm.cmd run check`，顺序执行单元测试与生产构建；GitHub Actions 使用相同命令。CI 配置已提供，远端运行结果以实际上传后的 Actions 记录为准。
+
+本轮 AI 协作过程、关键决策和面试展示路径见 [docs/AI_WORKFLOW.md](docs/AI_WORKFLOW.md)。新增的同条件拖拽 / 平移对比见 [docs/performance/COMPARISON.md](docs/performance/COMPARISON.md)。
 
 另提供 Playwright 完整检查脚本，在可启动 Edge 的普通终端中运行：
 
@@ -69,13 +73,24 @@ npm.cmd run test:e2e
 
 脚本使用独立工作区，会生成截图、浏览器报告和三个档位各三轮的平移测量。可用 `BASE_URL` 指定已有服务；检查脚本不会改动默认工作区。
 
-本次 Codex 的 shell 沙箱无法启动独立浏览器，也无法提供浏览器可访问的本地服务。真实浏览器检查使用用户启动的开发服务，通过应用内浏览器操作已编译的生产代码。实际验证结果见 `VALIDATION.md`。
+单独测量真实鼠标拖拽和平移（各档位、每种交互三轮）：
+
+```powershell
+$env:BENCHMARK_LABEL = "current"
+node scripts/interaction-benchmark.mjs
+```
+
+输出为 `test-results/interaction-current.json`，保留逐帧间隔、长任务、挂载量与外层界面提交次数。该脚本要求 preview 服务和本机 Edge，自动使用独立工作区。
+
+受限 shell 内可能无法启动独立浏览器，且沙箱内服务可能无法被外部浏览器访问。本轮在授权后于沙箱外运行本机 preview 和 Edge。历史应用内浏览器验收与本轮结果分别记录于 `VALIDATION.md`。
 
 ## 数据与工作区
 
 IndexedDB 数据库默认名 `frame-media-graph`，包含 graphs、nodes、edges、assets 四张表。
 
 为验收隔离数据，可在地址后加 `?workspace=acceptance`。允许 1～48 位字母、数字、下划线、连字符，使用独立的本地数据库，不覆盖默认图谱。
+
+恢复时会在同一只读事务中检查图版本、记录数量、节点字段、视口和二叉森林结构。恢复失败会保留原记录，显示可探索的临时示例并阻止图写回；此时素材导入不可用。明确确认重新生成数据集后恢复正常保存。临时示例的导出只包含当前内存示例，不是损坏原记录的备份。
 
 导出 JSON 包含真实图结构、位置、视口和导入媒体的元数据，**不包含媒体二进制文件**。本版本提供导出，没有实现 JSON 导入、跨设备同步或完整媒体备份。浏览器清理站点数据后，本地记录可能丢失。
 

@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-14T12:25:11.571Z",
+  "browser": "155.0.4283.45",
+  "platform": "win32 10.0.26200",
+  "cpu": "12th Gen Intel(R) Core(TM) i7-12700H",
+  "cores": 20,
+  "ramGB": 16,
+  "viewport": "1920x1080",
+  "assets": {
+    "originalSvg": 6,
+    "distinctVideo": 1,
+    "importedDuringTest": 1
+  },
+  "checks": [
+    "10,000 nodes / 9,999 edges / zero idle players",
+    "image preview; local MP4 playback; player released on close",
+    "drag updates real node position and saves incrementally",
+    "detach/reconnect obeys tree rules; position and new edge survive reload",
+    "imported image Blob + generated thumbnail survives reload"
+  ],
+  "initial": {
+    "appCommits": 5,
+    "buildMode": "production",
+    "culling": true,
+    "count": 10000,
+    "edges": 9999,
+    "renderedNodes": 13,
+    "overview": false,
+    "saveState": "pending",
+    "persistenceBlocked": false,
+    "loadMs": 688.1000000000931,
+    "readyMs": 5205.5,
+    "players": 0
+  },
+  "benchmarks": [],
+  "errors": [],
+  "dragShellCommits": 3,
+  "failure": "TimeoutError: locator.waitFor: Timeout 20000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('[data-node-id=\"node-9999\"]') to be visible\u001b[22m\n"
+}

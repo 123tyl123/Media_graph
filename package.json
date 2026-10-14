@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build && node scripts/create-standalone.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "test": "vitest run",
+    "check": "npm run test && npm run build",
     "test:e2e": "node scripts/browser-check.mjs"
   },
   "dependencies": {

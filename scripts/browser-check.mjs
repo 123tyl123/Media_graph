@@ -40,7 +40,10 @@ const focus = async (id) => {
   await page.waitForTimeout(400);
 };
 const saved = () =>
-  page.waitForFunction(() => window.frameDiagnostics?.().saveState === "saved");
+  page.waitForFunction(() => {
+    const state = window.frameDiagnostics?.();
+    return state?.saveState === "saved" && !state.busy;
+  });
 const diagnostics = () => page.evaluate(() => window.frameDiagnostics());
 const report = {
   date: new Date().toISOString(),
@@ -56,6 +59,10 @@ const report = {
   benchmarks: [],
   errors,
 };
+const recordCheck = (check) => {
+  report.checks.push(check);
+  console.log(`PASS: ${check}`);
+};
 try {
   const testURL = new URL(baseURL);
   testURL.searchParams.set('workspace', `automation-${Date.now()}`);
@@ -64,12 +71,13 @@ try {
   await page.waitForFunction(() =>
     Number.isFinite(window.frameDiagnostics?.().readyMs),
   );
+  await saved();
   report.initial = await diagnostics();
   assert.equal(report.initial.count, 10000);
   assert.equal(report.initial.edges, 9999);
   assert.equal(report.initial.players, 0);
   await page.screenshot({ path: path.join(results, "01-workspace.png") });
-  report.checks.push("10,000 nodes / 9,999 edges / zero idle players");
+  recordCheck("10,000 nodes / 9,999 edges / zero idle players");
 
   await page.getByRole("button", { name: "预览选中媒体" }).click();
   await page
@@ -87,12 +95,13 @@ try {
   await page.screenshot({ path: path.join(results, "02-video-preview.png") });
   await page.getByRole("button", { name: "关闭预览" }).click();
   assert.equal((await diagnostics()).players, 0);
-  report.checks.push(
+  recordCheck(
     "image preview; local MP4 playback; player released on close",
   );
 
   await focus(3);
   const xBefore = Number(await page.getByTestId("position-x").innerText());
+  const commitsBeforeDrag = (await diagnostics()).appCommits;
   const box = await page.locator('[data-node-id="node-3"]').boundingBox();
   assert(box);
   await page.mouse.move(box.x + box.width / 2, box.y + box.height - 17);
@@ -110,8 +119,11 @@ try {
     xBefore,
     "Dragging must change the actual node position",
   );
+  const dragShellCommits = (await diagnostics()).appCommits - commitsBeforeDrag;
+  assert(dragShellCommits < 5, `Dragging should isolate shell updates, got ${dragShellCommits}`);
+  report.dragShellCommits = dragShellCommits;
   await saved();
-  report.checks.push("drag updates real node position and saves incrementally");
+  recordCheck("drag updates real node position and saves incrementally");
 
   await page
     .getByRole("button", { name: "断开父节点连线", exact: true })
@@ -133,7 +145,7 @@ try {
     .locator(".relation-row")
     .filter({ hasText: "node-7000" })
     .waitFor();
-  report.checks.push(
+  recordCheck(
     "detach/reconnect obeys tree rules; position and new edge survive reload",
   );
 
@@ -163,7 +175,7 @@ try {
     .locator('img[src^="blob:"]')
     .waitFor();
   await page.getByRole("button", { name: "关闭预览" }).click();
-  report.checks.push(
+  recordCheck(
     "imported image Blob + generated thumbnail survives reload",
   );
 
@@ -181,14 +193,14 @@ try {
   await page.screenshot({ path: path.join(results, "03-overview.png") });
   await focus(9999);
   assert.equal((await diagnostics()).overview, false);
-  report.checks.push(
+  recordCheck(
     "overview stays under 255 mounted nodes; deep node 9999 remains accessible",
   );
 
   await page.getByRole("textbox", { name: "定位节点 ID" }).fill("123456");
   await page.getByRole("textbox", { name: "定位节点 ID" }).press("Enter");
   await page.getByRole("alert").filter({ hasText: "未找到该节点" }).waitFor();
-  report.checks.push("invalid node search shows feedback");
+  recordCheck("invalid node search shows feedback");
 
   // Browser frame samples during real mouse panning, not a promise based on idle FPS.
   for (const count of [100, 1000, 10000]) {
@@ -201,7 +213,8 @@ try {
       await page.waitForFunction(
         (expected) =>
           window.frameDiagnostics().count === expected &&
-          window.frameDiagnostics().saveState === "saved",
+          window.frameDiagnostics().saveState === "saved" &&
+          !window.frameDiagnostics().busy,
         count,
       );
       await page.locator('[data-node-id="node-0"]').waitFor();
@@ -286,9 +299,63 @@ try {
   await saved();
   await page.screenshot({ path: path.join(results, "04-final-workspace.png") });
   assert.deepEqual(errors, [], "No uncaught browser errors");
-  report.checks.push(
+  recordCheck(
     "three pan measurements each for 100 / 1,000 / 10,000 nodes; no uncaught browser errors",
   );
+
+  // Damage only this new workspace; recovery must never persist the fallback demo over it.
+  const recoveryWorkspace = `recovery-${Date.now()}`;
+  const recoveryURL = new URL(baseURL);
+  recoveryURL.searchParams.set("workspace", recoveryWorkspace);
+  await page.goto(recoveryURL.href);
+  await saved();
+  const inspectRecovery = async (corrupt = false) => page.evaluate(async ({ name, corrupt }) => {
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      return await new Promise((resolve, reject) => {
+        const transaction = database.transaction(["graphs", "nodes"], corrupt ? "readwrite" : "readonly");
+        const metadata = transaction.objectStore("graphs").get("main");
+        const node = transaction.objectStore("nodes").get(["main", "node-3"]);
+        metadata.onsuccess = () => {
+          if (corrupt) transaction.objectStore("graphs").put({ ...metadata.result, schemaVersion: 99 });
+        };
+        transaction.oncomplete = () => resolve({ meta: metadata.result, node: node.result });
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+    } finally {
+      database.close();
+    }
+  }, { name: `frame-media-graph-${recoveryWorkspace}`, corrupt });
+  await inspectRecovery(true);
+  const originalRecoveryRecords = await inspectRecovery();
+  await page.reload();
+  await page.waitForFunction(() => window.frameDiagnostics?.().persistenceBlocked === true);
+  await page.getByRole("alert").filter({ hasText: "临时示例" }).waitFor();
+  await focus(3);
+  const recoveryBox = await page.locator('[data-node-id="node-3"]').boundingBox();
+  assert(recoveryBox);
+  await page.mouse.move(recoveryBox.x + recoveryBox.width / 2, recoveryBox.y + recoveryBox.height - 17);
+  await page.mouse.down();
+  await page.mouse.move(recoveryBox.x + recoveryBox.width / 2 + 70, recoveryBox.y + recoveryBox.height - 17 + 40, { steps: 12 });
+  await page.mouse.up();
+  await page.getByRole("button", { name: "保存", exact: true }).click();
+  assert.equal((await diagnostics()).saveState, "error");
+  assert.deepEqual(await inspectRecovery(), originalRecoveryRecords);
+  assert(await page.getByRole("button", { name: "替换为本地素材" }).isDisabled());
+  await page.getByRole("button", { name: "100 节点数据集", exact: true }).click();
+  await page.getByRole("button", { name: "确认重新生成" }).click();
+  await saved();
+  assert.equal((await diagnostics()).persistenceBlocked, false);
+  await page.reload();
+  await saved();
+  assert.equal((await diagnostics()).count, 100);
+  assert.deepEqual(errors, [], "Recovery flow must not emit uncaught errors");
+  recordCheck("unknown schema is preserved; fallback edits cannot overwrite it; explicit regeneration restores saving");
   await writeFile(
     path.join(results, "browser-report.json"),
     JSON.stringify(report, null, 2),
