@@ -62,6 +62,7 @@ export interface StoredEdge {
 export const WIDTH = 216;
 export const HEIGHT = 176;
 export const DEFAULT_VIEWPORT: Viewport = { x: 260, y: 64, zoom: 0.82 };
+export const GRAPH_SCHEMA_VERSION = 1;
 export const assetNames = [
   "远山与晨雾",
   "海岸的呼吸",
@@ -102,6 +103,11 @@ export function generateGraph(count: number): Graph {
   return { nodes, edges };
 }
 
+// Membership index is rebuilt only when IDs/order change, never for a position update.
+export function buildNodeIndex(nodes: MediaNode[]): ReadonlyMap<string, number> {
+  return new Map(nodes.map((node, index) => [node.id, index]));
+}
+
 export function buildTopology(edges: GraphEdge[]): Topology {
   const parent = new Map<string, string>();
   const children = new Map<string, string[]>();
@@ -112,6 +118,69 @@ export function buildTopology(edges: GraphEdge[]): Topology {
     children.set(edge.source, list);
   }
   return { parent, children };
+}
+
+type GraphValidation = { valid: true } | { valid: false; error: string };
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+const isId = (value: unknown): value is string =>
+  typeof value === "string" && value.trim().length > 0;
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value);
+
+// Validate untrusted recovery data in O(nodes + edges), without recursive traversal.
+export function validateGraph(value: unknown): GraphValidation {
+  const invalid = (error: string): GraphValidation => ({ valid: false, error });
+  if (!isRecord(value) || !Array.isArray(value.nodes) || !Array.isArray(value.edges))
+    return invalid("图数据格式无效");
+  const ids = new Set<string>();
+  for (const node of value.nodes) {
+    if (!isRecord(node) || !isId(node.id)) return invalid("节点 ID 无效");
+    if (ids.has(node.id)) return invalid(`节点 ID 重复：${node.id}`);
+    ids.add(node.id);
+    if (
+      !isRecord(node.position) ||
+      !isFiniteNumber(node.position.x) || !isFiniteNumber(node.position.y)
+    )
+      return invalid(`节点坐标无效：${node.id}`);
+    const data = node.data;
+    if (
+      !isRecord(data) || typeof data.title !== "string" || !isId(data.assetId) ||
+      (data.kind !== "image" && data.kind !== "video") ||
+      !isFiniteNumber(data.order) || !Number.isInteger(data.order) || data.order < 0 ||
+      !isFiniteNumber(data.depth) || !Number.isInteger(data.depth) || data.depth < 0
+    )
+      return invalid(`节点媒体信息无效：${node.id}`);
+  }
+  const edgeIds = new Set<string>();
+  const parents = new Set<string>();
+  const children = new Map<string, string[]>();
+  for (const edge of value.edges) {
+    if (!isRecord(edge) || !isId(edge.id)) return invalid("连线 ID 无效");
+    if (edgeIds.has(edge.id)) return invalid(`连线 ID 重复：${edge.id}`);
+    edgeIds.add(edge.id);
+    if (
+      !isId(edge.source) || !isId(edge.target) ||
+      !ids.has(edge.source) || !ids.has(edge.target)
+    )
+      return invalid(`连线引用了不存在的节点：${edge.id}`);
+    if (edge.source === edge.target) return invalid(`节点不能连接自身：${edge.source}`);
+    const targets = children.get(edge.source) ?? [];
+    if (targets.includes(edge.target)) return invalid(`重复连线：${edge.id}`);
+    if (parents.has(edge.target)) return invalid(`节点存在多个父节点：${edge.target}`);
+    if (targets.length >= 2) return invalid(`每个节点最多连接两个子节点：${edge.source}`);
+    for (const handle of [edge.sourceHandle, edge.targetHandle])
+      if (handle !== undefined && handle !== null && typeof handle !== "string")
+        return invalid(`连线连接点无效：${edge.id}`);
+    parents.add(edge.target);
+    targets.push(edge.target);
+    children.set(edge.source, targets);
+  }
+  const queue = [...ids].filter((id) => !parents.has(id));
+  for (let cursor = 0; cursor < queue.length; cursor++)
+    queue.push(...(children.get(queue[cursor]) ?? []));
+  if (queue.length !== ids.size) return invalid("图中存在环");
+  return { valid: true };
 }
 
 export function connectionError(

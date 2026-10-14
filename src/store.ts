@@ -8,8 +8,10 @@ import type {
 } from "@xyflow/react";
 import {
   buildTopology,
+  buildNodeIndex,
   connectionError,
   generateGraph,
+  GRAPH_SCHEMA_VERSION,
   toStoredNode,
   toStoredEdge,
 } from "./model";
@@ -25,6 +27,7 @@ import { db, loadGraph, replaceGraph, savePatch } from "./database";
 
 type SaveState = "loading" | "saved" | "pending" | "saving" | "error";
 interface GraphState extends Graph {
+  nodeIndex: ReadonlyMap<string, number>;
   topology: Topology;
   ready: boolean;
   busy: boolean;
@@ -36,6 +39,7 @@ interface GraphState extends Graph {
   culling: boolean;
   viewport: Viewport;
   saveState: SaveState;
+  persistenceBlocked: boolean;
   notice: string;
   loadMs: number;
   initialize: () => Promise<void>;
@@ -61,8 +65,14 @@ const dirtyNodes = new Map<string, StoredNode>();
 const dirtyEdges = new Map<string, StoredEdge>();
 const removedEdges = new Set<string>();
 let dirtyViewport: Viewport | undefined;
+const recoveryNotice =
+  "原有本地数据已保留。当前为临时示例，编辑不会覆盖原数据；重新生成数据集后可恢复保存。";
 
 function markDirty() {
+  if (useGraph.getState().persistenceBlocked) {
+    useGraph.setState({ saveState: "error", notice: recoveryNotice });
+    return;
+  }
   useGraph.setState({ saveState: "pending" });
   if (timer) clearTimeout(timer);
   timer = setTimeout(() => void useGraph.getState().flush(), 450);
@@ -70,6 +80,7 @@ function markDirty() {
 
 export const useGraph = create<GraphState>((set, get) => ({
   nodes: [],
+  nodeIndex: buildNodeIndex([]),
   edges: [],
   topology: buildTopology([]),
   ready: false,
@@ -82,6 +93,7 @@ export const useGraph = create<GraphState>((set, get) => ({
   culling: true,
   viewport: { x: 350, y: 64, zoom: 0.82 },
   saveState: "loading",
+  persistenceBlocked: false,
   notice: "",
   loadMs: 0,
   initialize: () => {
@@ -95,10 +107,12 @@ export const useGraph = create<GraphState>((set, get) => ({
         const viewport = saved?.meta.viewport ?? get().viewport;
         set({
           ...graph,
+          nodeIndex: buildNodeIndex(graph.nodes),
           topology: buildTopology(graph.edges),
           viewport,
           ready: true,
           saveState: "saved",
+          persistenceBlocked: false,
           loadMs: performance.now() - start,
         });
       } catch (error) {
@@ -106,10 +120,12 @@ export const useGraph = create<GraphState>((set, get) => ({
         const graph = generateGraph(10_000);
         set({
           ...graph,
+          nodeIndex: buildNodeIndex(graph.nodes),
           topology: buildTopology(graph.edges),
           ready: true,
           saveState: "error",
-          notice: `本地存储加载失败：${String(error)}。可导出数据，或重新生成以恢复保存。`,
+          persistenceBlocked: true,
+          notice: `本地存储加载失败：${String(error)}。${recoveryNotice}`,
           loadMs: performance.now() - start,
         });
       }
@@ -120,7 +136,7 @@ export const useGraph = create<GraphState>((set, get) => ({
     if (get().busy) return;
     set({ busy: true, notice: "" });
     try {
-      await get().flush();
+      if (!get().persistenceBlocked) await get().flush();
       const start = performance.now();
       const graph = generateGraph(count);
       await replaceGraph(graph);
@@ -130,6 +146,7 @@ export const useGraph = create<GraphState>((set, get) => ({
       dirtyViewport = undefined;
       set({
         ...graph,
+        nodeIndex: buildNodeIndex(graph.nodes),
         topology: buildTopology(graph.edges),
         selectedId: "node-0",
         selectedEdge: null,
@@ -137,6 +154,7 @@ export const useGraph = create<GraphState>((set, get) => ({
         overview: false,
         compact: false,
         saveState: "saved",
+        persistenceBlocked: false,
         loadMs: performance.now() - start,
       });
     } catch (error) {
@@ -148,7 +166,13 @@ export const useGraph = create<GraphState>((set, get) => ({
   onNodesChange: (changes) => {
     // Node removal is intentionally disabled: a node owns subtree topology.
     const permitted = changes.filter((change) => change.type !== "remove");
-    set((state) => ({ nodes: applyNodeChanges(permitted, state.nodes) }));
+    set((state) => {
+      const nodes = applyNodeChanges(permitted, state.nodes);
+      const structural = permitted.some(
+        (change) => change.type === "add" || change.type === "replace",
+      );
+      return { nodes, ...(structural ? { nodeIndex: buildNodeIndex(nodes) } : {}) };
+    });
   },
   onEdgesChange: (changes) => {
     const deleted = changes.filter((c) => c.type === "remove").map((c) => c.id);
@@ -169,8 +193,8 @@ export const useGraph = create<GraphState>((set, get) => ({
     const state = get();
     if (state.busy) return;
     if (
-      !state.nodes.some((n) => n.id === connection.source) ||
-      !state.nodes.some((n) => n.id === connection.target)
+      !state.nodeIndex.has(connection.source) ||
+      !state.nodeIndex.has(connection.target)
     ) {
       set({ notice: "未找到目标节点，请检查 ID" });
       return;
@@ -210,13 +234,17 @@ export const useGraph = create<GraphState>((set, get) => ({
     const changed = nodes.find((n) => n.id === id);
     if (!changed) return;
     dirtyNodes.set(id, toStoredNode(changed));
-    set({ nodes, notice: "素材已替换并保存在本地" });
+    set({ nodes, notice: "素材已替换，等待保存图谱引用" });
     markDirty();
   },
   flush: async () => {
     if (timer) {
       clearTimeout(timer);
       timer = undefined;
+    }
+    if (get().persistenceBlocked) {
+      set({ saveState: "error", notice: recoveryNotice });
+      return;
     }
     const run = async () => {
       // Take the snapshot when this write starts. Newer queued values supersede older ones.
@@ -264,12 +292,20 @@ export const useGraph = create<GraphState>((set, get) => ({
   },
 }));
 
+export function selectNode(
+  state: Pick<GraphState, "nodes" | "nodeIndex">,
+  id: string | null,
+): MediaNode | undefined {
+  const index = id === null ? undefined : state.nodeIndex.get(id);
+  return index === undefined ? undefined : state.nodes[index];
+}
+
 export async function exportGraph() {
   const state = useGraph.getState();
   const assets = await db.assets.toArray().catch(() => []);
   // JSON contains graph metadata; imported media remains in IndexedDB.
   const data = {
-    schemaVersion: 1,
+    schemaVersion: GRAPH_SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
     nodes: state.nodes.map(toStoredNode),
     edges: state.edges.map(toStoredEdge),

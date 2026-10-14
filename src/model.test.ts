@@ -5,6 +5,7 @@ import {
   connectionError,
   generateGraph,
   toStoredNode,
+  validateGraph,
 } from "./model";
 
 describe("binary media graph", () => {
@@ -77,5 +78,45 @@ describe("binary media graph", () => {
     });
     expect(stored).not.toHaveProperty("selected");
     expect(stored).not.toHaveProperty("dragging");
+  });
+});
+
+describe("graph recovery validation", () => {
+  it("accepts a disconnected forest without changing IDs or initial metadata", () => {
+    const graph = generateGraph(100);
+    graph.edges = graph.edges.filter((edge) => edge.target !== "node-5");
+    const before = JSON.stringify(graph);
+    expect(validateGraph(graph)).toEqual({ valid: true });
+    expect(JSON.stringify(graph)).toBe(before);
+  });
+
+  it.each([
+    ["duplicate node IDs", (graph: ReturnType<typeof generateGraph>) => { graph.nodes[1].id = graph.nodes[0].id; }, "重复"],
+    ["duplicate edge IDs", (graph: ReturnType<typeof generateGraph>) => { graph.edges[1].id = graph.edges[0].id; }, "重复"],
+    ["dangling edges", (graph: ReturnType<typeof generateGraph>) => { graph.edges[0].target = "missing"; }, "不存在"],
+    ["self connections", (graph: ReturnType<typeof generateGraph>) => { graph.edges[0].target = graph.edges[0].source; }, "自身"],
+    ["duplicate connections", (graph: ReturnType<typeof generateGraph>) => { graph.edges.push({ ...graph.edges[0], id: "extra" }); }, "重复"],
+    ["multiple parents", (graph: ReturnType<typeof generateGraph>) => { graph.edges.push({ id: "extra", source: "node-2", target: "node-3" }); }, "父节点"],
+    ["third children", (graph: ReturnType<typeof generateGraph>) => { graph.edges = graph.edges.filter((edge) => edge.target !== "node-3"); graph.edges.push({ id: "extra", source: "node-0", target: "node-3" }); }, "两个"],
+    ["rootless cycles", (graph: ReturnType<typeof generateGraph>) => { graph.edges = [{ id: "a", source: "node-0", target: "node-1" }, { id: "b", source: "node-1", target: "node-0" }]; }, "环"],
+    ["non-finite positions", (graph: ReturnType<typeof generateGraph>) => { graph.nodes[0].position.x = Infinity; }, "坐标"],
+  ])("rejects %s", (_name, corrupt, message) => {
+    const graph = generateGraph(7);
+    corrupt(graph);
+    expect(validateGraph(graph)).toEqual({ valid: false, error: expect.stringContaining(message) });
+  });
+
+  it.each([null, {}, { nodes: [], edges: null }, { nodes: [null], edges: [] },
+    { nodes: [{ id: "node-0", position: { x: 0, y: 0 }, data: {} }], edges: [] },
+  ])("rejects malformed runtime input: %j", (value) => {
+    expect(validateGraph(value).valid).toBe(false);
+  });
+
+  it("handles a 10,000-node chain iteratively", () => {
+    const graph = generateGraph(10000);
+    graph.edges = graph.edges.map((edge, index) => ({ ...edge, source: `node-${index}` }));
+    expect(validateGraph(graph)).toEqual({ valid: true });
+    graph.edges.push({ id: "cycle", source: "node-9999", target: "node-0" });
+    expect(validateGraph(graph)).toEqual({ valid: false, error: expect.stringContaining("环") });
   });
 });

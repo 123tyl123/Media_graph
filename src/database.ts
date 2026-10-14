@@ -1,9 +1,11 @@
 import Dexie, { type Table } from "dexie";
 import {
   DEFAULT_VIEWPORT,
+  GRAPH_SCHEMA_VERSION,
   fromStoredNode,
   toStoredEdge,
   toStoredNode,
+  validateGraph,
 } from "./model";
 import type { Asset, Graph, GraphMeta, StoredNode, StoredEdge } from "./model";
 import type { Viewport } from "@xyflow/react";
@@ -37,23 +39,34 @@ export const db = new GraphDatabase(
 export async function loadGraph(
   database = db,
 ): Promise<{ graph: Graph; meta: GraphMeta } | null> {
-  const meta = await database.graphs.get("main");
-  if (!meta) return null;
-  const [nodes, storedEdges] = await Promise.all([
-    database.nodes.where("graphId").equals("main").toArray(),
-    database.edges.where("graphId").equals("main").toArray(),
-  ]);
-  if (nodes.length !== meta.count)
-    throw new Error("本地图数据不完整，请导出后重新生成");
-  return {
-    graph: {
-      nodes: nodes
-        .sort((a, b) => a.data.order - b.data.order)
-        .map(fromStoredNode),
+  // Read metadata and graph records from one consistent IndexedDB snapshot.
+  return database.transaction("r", [database.graphs, database.nodes, database.edges], async () => {
+    const [meta, nodes, storedEdges] = await Promise.all([
+      database.graphs.get("main"),
+      database.nodes.where("graphId").equals("main").toArray(),
+      database.edges.where("graphId").equals("main").toArray(),
+    ]);
+    if (!meta) {
+      if (nodes.length || storedEdges.length) throw new Error("本地图元数据缺失，原记录已保留");
+      return null;
+    }
+    if (meta.schemaVersion !== GRAPH_SCHEMA_VERSION)
+      throw new Error(`不支持的图数据版本：${meta.schemaVersion}，原记录已保留`);
+    if (!Number.isInteger(meta.count) || meta.count < 0 || nodes.length !== meta.count)
+      throw new Error("本地图数据不完整，原记录已保留");
+    const viewport = meta.viewport;
+    if (!viewport || !Number.isFinite(viewport.x) || !Number.isFinite(viewport.y) ||
+      !Number.isFinite(viewport.zoom) || viewport.zoom <= 0 || !Number.isFinite(meta.savedAt))
+      throw new Error("本地图视口或保存时间无效，原记录已保留");
+    const graph = {
+      nodes: nodes.map(fromStoredNode),
       edges: storedEdges.map(({ graphId: _graphId, ...edge }) => edge),
-    },
-    meta,
-  };
+    };
+    const validation = validateGraph(graph);
+    if (!validation.valid) throw new Error(`本地图数据无效：${validation.error}，原记录已保留`);
+    graph.nodes.sort((a, b) => a.data.order - b.data.order);
+    return { graph, meta };
+  });
 }
 
 export async function replaceGraph(graph: Graph, database = db) {
@@ -77,7 +90,7 @@ export async function replaceGraph(graph: Graph, database = db) {
         count: graph.nodes.length,
         viewport: DEFAULT_VIEWPORT,
         savedAt: Date.now(),
-        schemaVersion: 1,
+        schemaVersion: GRAPH_SCHEMA_VERSION,
       });
     },
   );

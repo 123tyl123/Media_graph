@@ -50,4 +50,30 @@ describe("IndexedDB persistence", () => {
     expect(restored?.graph.edges).toHaveLength(99);
     expect(restored?.meta.count).toBe(100);
   });
+
+  it.each(["cycle", "dangling", "invalid node", "version", "viewport", "missing metadata"])(
+    "refuses %s on recovery and preserves the stored records", async (corruption) => {
+      database = new GraphDatabase(`test-${crypto.randomUUID()}`);
+      await replaceGraph(generateGraph(7), database);
+      if (corruption === "cycle")
+        await database.edges.put({ graphId: "main", id: "cycle", source: "node-3", target: "node-0" });
+      if (corruption === "dangling")
+        await database.edges.update(["main", "edge-1"], { target: "missing" });
+      if (corruption === "invalid node")
+        await database.nodes.update(["main", "node-0"], { data: null as never });
+      if (corruption === "version")
+        await database.graphs.update("main", { schemaVersion: 99 });
+      if (corruption === "viewport")
+        await database.graphs.update("main", { viewport: { x: 0, y: 0, zoom: 0 } });
+      if (corruption === "missing metadata") await database.graphs.delete("main");
+      const before = await Promise.all([database.nodes.toArray(), database.edges.toArray(), database.graphs.toArray()]);
+      await expect(loadGraph(database)).rejects.toThrow();
+      expect(await Promise.all([database.nodes.toArray(), database.edges.toArray(), database.graphs.toArray()])).toEqual(before);
+    },
+  );
+
+  it("returns null only for a workspace without graph records", async () => {
+    database = new GraphDatabase(`test-${crypto.randomUUID()}`);
+    expect(await loadGraph(database)).toBeNull();
+  });
 });
