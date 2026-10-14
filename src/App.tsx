@@ -1,667 +1,34 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Background,
-  BackgroundVariant,
-  Handle,
-  Position,
-  ReactFlow,
-  useReactFlow,
-  useStore as useFlowStore,
-} from "@xyflow/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useReactFlow } from "@xyflow/react";
 import type {
   NodeChange,
-  NodeProps,
   ReactFlowInstance,
   ReactFlowProps,
   Viewport,
 } from "@xyflow/react";
 import {
-  ArrowDownToLine,
-  ArrowRight,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  CircleHelp,
-  Crosshair,
-  Database,
-  Expand,
-  FileImage,
-  Film,
-  FolderOpen,
-  GitBranch,
-  Image as ImageIcon,
-  Layers,
-  Link2,
-  LoaderCircle,
-  Maximize2,
-  Minus,
-  MousePointer2,
-  Play,
-  Plus,
-  Save,
-  Search,
-  SlidersHorizontal,
-  Sparkles,
-  Unplug,
-  Upload,
-  X,
+  ArrowDownToLine, ArrowRight, Check, ChevronDown, ChevronRight, CircleHelp,
+  Crosshair, Database, FileImage, FolderOpen, GitBranch, Layers, Link2,
+  LoaderCircle, Maximize2, Minus, MousePointer2, Plus, Save, Search,
+  SlidersHorizontal, Sparkles, Unplug, X,
 } from "lucide-react";
-import {
-  acquireThumbnail,
-  getAsset,
-  importAsset,
-  releaseThumbnail,
-  resolveMediaPath,
-} from "./database";
-import { buildOverview, connectionError } from "./model";
-import type {
-  GraphNode,
-  MediaNode as MediaNodeType,
-  SummaryNode as SummaryNodeType,
-} from "./model";
-import { exportGraph, useGraph } from "./store";
+import { connectionError } from "./model";
+import type { GraphNode, MediaNode as MediaNodeType } from "./model";
+import { exportGraph, selectNode, useGraph } from "./store";
+import { GraphCanvas } from "./components/GraphCanvas";
+import { Inspector } from "./components/Inspector";
+import { MediaPreview } from "./components/MediaPreview";
+import { BrowserSampler, LiveMetrics } from "./components/Performance";
 
-function useThumbnail(assetId: string) {
-  const [url, setUrl] = useState("");
-  useEffect(() => {
-    let cancelled = false;
-    let acquired = false;
-    setUrl("");
-    acquireThumbnail(assetId)
-      .then((value) => {
-        acquired = true;
-        if (cancelled) releaseThumbnail(assetId);
-        else setUrl(value);
-      })
-      .catch(() => {
-        if (!cancelled) setUrl(resolveMediaPath("/media/scene-0.svg"));
-      });
-    return () => {
-      cancelled = true;
-      if (acquired) releaseThumbnail(assetId);
-    };
-  }, [assetId]);
-  return url;
-}
-
-function Thumbnail({
-  assetId,
-  alt,
-  ...props
-}: {
-  assetId: string;
-  alt: string;
-  className?: string;
-}) {
-  const url = useThumbnail(assetId);
-  return url ? (
-    <img
-      {...props}
-      src={url}
-      alt={alt}
-      loading="lazy"
-      decoding="async"
-      draggable={false}
-      onError={(event) => {
-        event.currentTarget.onerror = null;
-        event.currentTarget.src = resolveMediaPath("/media/scene-0.svg");
-      }}
-    />
-  ) : (
-    <div className="thumbnail-loading" />
-  );
-}
-
-const MediaNode = memo(function MediaNode({
-  id,
-  data,
-  selected,
-}: NodeProps<MediaNodeType>) {
-  const compact = useGraph((s) => s.compact);
-  return (
-    <article
-      className={`media-node ${selected ? "is-selected" : ""} ${compact ? "is-compact" : ""}`}
-      data-node-id={id}
-    >
-      <Handle type="target" position={Position.Top} id="in" />
-      <div className="node-cover">
-        {!compact && <Thumbnail assetId={data.assetId} alt={data.title} />}
-        <span className="node-kind">
-          {data.kind === "video" ? <Film size={10} /> : <ImageIcon size={10} />}
-          {data.kind === "video" ? "视频" : "图片"}
-        </span>
-        <button
-          className="node-open nodrag nopan"
-          title={`预览 ${data.title}`}
-          aria-label={`预览 ${id}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            useGraph.setState({ previewId: id, selectedId: id });
-          }}
-        >
-          {data.kind === "video" ? (
-            <Play size={19} fill="currentColor" />
-          ) : (
-            <Maximize2 size={17} />
-          )}
-        </button>
-        <span className="node-number">
-          {String(data.order + 1).padStart(5, "0")}
-        </span>
-      </div>
-      <div className="node-caption">
-        <strong>{data.title}</strong>
-        <span>
-          {data.kind === "video" ? "MP4 · 点击预览" : "IMAGE · 缩略图"}
-        </span>
-      </div>
-      <Handle type="source" position={Position.Bottom} id="out" />
-    </article>
-  );
-});
-
-const SummaryNode = memo(function SummaryNode({
-  data,
-}: NodeProps<SummaryNodeType>) {
-  return (
-    <article className={`summary-node ${data.count > 1 ? "has-cluster" : ""}`}>
-      <div>
-        <Layers size={13} />
-        <strong>
-          {data.count > 1
-            ? `${data.count.toLocaleString()} 个节点`
-            : data.title.slice(0, 5)}
-        </strong>
-      </div>
-      <span>
-        {data.count > 1 ? "点击展开子树" : "点击进入详情"}{" "}
-        <ArrowRight size={10} />
-      </span>
-      <Handle type="target" position={Position.Top} />
-      <Handle type="source" position={Position.Bottom} />
-    </article>
-  );
-});
-const nodeTypes = { media: MediaNode, summary: SummaryNode };
-const defaultEdgeOptions = {
-  type: "straight",
-  style: { stroke: "#aebcb7", strokeWidth: 1.4 },
-  interactionWidth: 14,
-};
-const ignoreChanges = () => {};
-
-function LiveMetrics() {
-  const [fps, setFps] = useState<number | null>(null);
-  const zoom = useFlowStore((s) => Math.round(s.transform[2] * 100));
-  const [visible, setVisible] = useState(0);
-  useEffect(() => {
-    let raf = 0;
-    let frames = 0;
-    let start = performance.now();
-    const tick = (now: number) => {
-      frames++;
-      if (now - start > 1000) {
-        setFps(Math.round((frames * 1000) / (now - start)));
-        setVisible(document.querySelectorAll(".react-flow__node").length);
-        start = now;
-        frames = 0;
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
-  return (
-    <div className="live-metrics">
-      <span className="live-dot" />
-      <b>{fps ?? "—"} FPS</b>
-      <span className="metrics-divider" />
-      <span>当前挂载 {visible}</span>
-      <span className="metrics-divider" />
-      <span>{zoom}%</span>
-    </div>
-  );
-}
-
-interface PanSample {
-  buildMode: string;
-  count: number;
-  edges: number;
-  culling: boolean;
-  overview: boolean;
-  averageFPS: number;
-  p95FrameMs: number;
-  maxLongTaskMs: number;
-  mounted: number;
-  viewport: string;
-  graphLoadMs: number;
-  measuredAt: string;
-}
-
-function BrowserSampler() {
-  const flow = useReactFlow();
-  const [sampling, setSampling] = useState(false);
-  const [samples, setSamples] = useState<PanSample[]>([]);
-  const raf = useRef(0);
-  const observerRef = useRef<PerformanceObserver | null>(null);
-  useEffect(
-    () => () => {
-      cancelAnimationFrame(raf.current);
-      observerRef.current?.disconnect();
-    },
-    [],
-  );
-  const run = () => {
-    const state = useGraph.getState();
-    if (sampling || state.busy) return;
-    setSampling(true);
-    const origin = flow.getViewport();
-    const started = performance.now();
-    let previous = started;
-    const frames: number[] = [];
-    const tasks: number[] = [];
-    if (
-      typeof PerformanceObserver !== "undefined" &&
-      PerformanceObserver.supportedEntryTypes.includes("longtask")
-    ) {
-      const observer = new PerformanceObserver((list) =>
-        tasks.push(...list.getEntries().map((item) => item.duration)),
-      );
-      observer.observe({ type: "longtask", buffered: false });
-      observerRef.current = observer;
-    }
-    const tick = (now: number) => {
-      frames.push(now - previous);
-      previous = now;
-      const elapsed = now - started;
-      void flow.setViewport({
-        x: origin.x + Math.sin(elapsed / 400) * 95,
-        y: origin.y + Math.sin(elapsed / 530) * 55,
-        zoom: origin.zoom,
-      });
-      if (elapsed < 3000) {
-        raf.current = requestAnimationFrame(tick);
-        return;
-      }
-      const observer = observerRef.current;
-      if (observer) {
-        tasks.push(...observer.takeRecords().map((item) => item.duration));
-        observer.disconnect();
-        observerRef.current = null;
-      }
-      void flow.setViewport(origin);
-      const sorted = frames.slice(1).sort((a, b) => a - b);
-      const sample: PanSample = {
-        buildMode: import.meta.env.PROD ? 'production' : 'development',
-        count: state.nodes.length,
-        edges: state.edges.length,
-        culling: state.culling,
-        overview: state.overview,
-        averageFPS: Math.round(((frames.length * 1000) / elapsed) * 10) / 10,
-        p95FrameMs:
-          Math.round((sorted[Math.floor(sorted.length * 0.95)] ?? 0) * 10) / 10,
-        maxLongTaskMs: Math.round(Math.max(0, ...tasks)),
-        mounted: document.querySelectorAll(".react-flow__node").length,
-        viewport: `${document.documentElement.clientWidth}×${document.documentElement.clientHeight}`,
-        graphLoadMs: Math.round(state.loadMs),
-        measuredAt: new Date().toISOString(),
-      };
-      setSamples((items) => [...items, sample]);
-      setSampling(false);
-    };
-    raf.current = requestAnimationFrame(tick);
-  };
-  const exportSamples = () => {
-    const payload = {
-      method:
-        "3-second requestAnimationFrame-driven React Flow viewport panning; see each sample buildMode; sample images and one video are reused. Does not measure physical dragging or media decoding.",
-      userAgent: navigator.userAgent,
-      samples,
-    };
-    const url = URL.createObjectURL(
-      new Blob([JSON.stringify(payload, null, 2)], {
-        type: "application/json",
-      }),
-    );
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "frame-browser-samples.json";
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-  };
-  return (
-    <div className="sampler">
-      <button className="outline-button" disabled={sampling} onClick={run}>
-        {sampling ? (
-          <LoaderCircle className="spin" size={13} />
-        ) : (
-          <Play size={13} />
-        )}
-        {sampling ? "正在平移采样…" : "运行 3 秒平移采样"}
-      </button>
-      {samples.length > 0 && (
-        <>
-          <div className="sampler-result" data-testid="pan-result">
-            <strong>{samples.at(-1)!.averageFPS} FPS</strong>
-            <span>
-              P95 {samples.at(-1)!.p95FrameMs} ms · 最长任务{" "}
-              {samples.at(-1)!.maxLongTaskMs} ms
-            </span>
-            <small>
-              {samples.at(-1)!.count.toLocaleString()} 节点 · 挂载{" "}
-              {samples.at(-1)!.mounted} · {samples.at(-1)!.viewport}
-            </small>
-          </div>
-          <button className="sampler-export" onClick={exportSamples}>
-            导出 {samples.length} 组采样记录 <ArrowDownToLine size={11} />
-          </button>
-        </>
-      )}
-      <p>自动平移采样为当前视口的结果；请在生产构建和实际素材条件下复测。</p>
-    </div>
-  );
-}
-
-function MediaPreview() {
-  const id = useGraph((s) => s.previewId);
-  const node = useGraph((s) => s.nodes.find((n) => n.id === s.previewId));
-  const [source, setSource] = useState("");
-  const [error, setError] = useState("");
-  useEffect(() => {
-    if (!node) return;
-    let cancelled = false;
-    let blobUrl: string | undefined;
-    setSource("");
-    setError("");
-    getAsset(node.data.assetId)
-      .then((asset) => {
-        if (!asset) throw new Error("媒体文件不存在");
-        if (cancelled) return;
-        blobUrl = asset.blob ? URL.createObjectURL(asset.blob) : undefined;
-        setSource(blobUrl ?? asset.url ?? "");
-      })
-      .catch((reason) => {
-        if (!cancelled) setError(String(reason));
-      });
-    return () => {
-      cancelled = true;
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-    };
-  }, [node?.data.assetId]);
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") useGraph.setState({ previewId: null });
-    };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, []);
-  if (!id || !node) return null;
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget)
-          useGraph.setState({ previewId: null });
-      }}
-    >
-      <section
-        className="preview-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label="媒体预览"
-      >
-        <header>
-          <span>
-            {node.data.kind === "video" ? (
-              <Film size={18} />
-            ) : (
-              <ImageIcon size={18} />
-            )}
-            <strong>{node.data.title}</strong>
-            <span className="mono">{node.id}</span>
-          </span>
-          <button
-            className="icon-button"
-            aria-label="关闭预览"
-            onClick={() => useGraph.setState({ previewId: null })}
-          >
-            <X size={20} />
-          </button>
-        </header>
-        <div className="preview-content">
-          {error ? (
-            <p>{error}</p>
-          ) : source ? (
-            node.data.kind === "video" ? (
-              <video
-                key={`${id}-${source}`}
-                src={source}
-                controls
-                preload="none"
-                autoPlay
-                playsInline
-                onError={() => setError("视频加载失败，请替换素材后重试")}
-              />
-            ) : (
-              <img src={source} alt={node.data.title} />
-            )
-          ) : (
-            <LoaderCircle className="spin" />
-          )}
-        </div>
-        <footer>媒体按需加载 · 原始素材保存在本地或随项目提供</footer>
-      </section>
-    </div>
-  );
-}
-
-function Inspector({ focusNode }: { focusNode: (id: string) => void }) {
-  const selected = useGraph((s) => s.nodes.find((n) => n.id === s.selectedId));
-  const topology = useGraph((s) => s.topology);
-  const edges = useGraph((s) => s.edges);
-  const busy = useGraph((s) => s.busy);
-  const [connectingTo, setConnectingTo] = useState("");
-  const [importing, setImporting] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-  if (!selected)
-    return (
-      <aside className="inspector">
-        <div className="inspector-title">
-          节点详情 <SlidersHorizontal size={15} />
-        </div>
-        <div className="empty-inspector">
-          <MousePointer2 size={28} />
-          <p>选择一个节点</p>
-          <span>查看媒体与连接关系</span>
-        </div>
-      </aside>
-    );
-  const parent = topology.parent.get(selected.id);
-  const children = topology.children.get(selected.id) ?? [];
-  const parentEdge = parent
-    ? edges.find((e) => e.target === selected.id)
-    : undefined;
-  const handleImport = async (file: File | undefined) => {
-    if (!file) return;
-    setImporting(true);
-    try {
-      const asset = await importAsset(file);
-      useGraph
-        .getState()
-        .replaceMedia(selected.id, asset.id, asset.kind, file.name);
-    } catch (error) {
-      useGraph.setState({ notice: `素材导入失败：${String(error)}` });
-    } finally {
-      setImporting(false);
-      if (inputRef.current) inputRef.current.value = "";
-    }
-  };
-  return (
-    <aside className="inspector">
-      <div className="inspector-title">
-        节点详情 <SlidersHorizontal size={15} />
-      </div>
-      <div className="inspector-scroll">
-        <div className="inspector-cover">
-          <Thumbnail
-            assetId={selected.data.assetId}
-            alt={selected.data.title}
-          />
-          <button
-            className="inspector-play"
-            aria-label="预览选中媒体"
-            onClick={() => useGraph.setState({ previewId: selected.id })}
-          >
-            {selected.data.kind === "video" ? (
-              <Play fill="currentColor" size={20} />
-            ) : (
-              <Expand size={20} />
-            )}
-          </button>
-        </div>
-        <div className="type-pill">
-          {selected.data.kind === "video" ? (
-            <Film size={12} />
-          ) : (
-            <ImageIcon size={12} />
-          )}
-          {selected.data.kind === "video" ? "视频节点" : "图片节点"}
-        </div>
-        <h2>{selected.data.title}</h2>
-        <p className="inspector-id mono" data-testid="selected-id">
-          {selected.id}
-        </p>
-        <div className="property-grid">
-          <span>初始层级</span>
-          <b>L{selected.data.depth + 1}</b>
-          <span>坐标 X</span>
-          <b data-testid="position-x">{Math.round(selected.position.x)}</b>
-          <span>坐标 Y</span>
-          <b data-testid="position-y">{Math.round(selected.position.y)}</b>
-          <span>子节点</span>
-          <b>{children.length} / 2</b>
-        </div>
-        <div className="inspector-section">
-          <h3>
-            连接关系 <GitBranch size={14} />
-          </h3>
-          <label>父节点</label>
-          {parent ? (
-            <div className="relation-row">
-              <button onClick={() => focusNode(parent)}>
-                <span className="relation-dot" />
-                {parent}
-                <ChevronRight size={13} />
-              </button>
-              <button
-                className="icon-button disconnect"
-                title="断开父节点连线"
-                aria-label="断开父节点连线"
-                disabled={busy}
-                onClick={() =>
-                  parentEdge && useGraph.getState().disconnect(parentEdge.id)
-                }
-              >
-                <Unplug size={14} />
-              </button>
-            </div>
-          ) : (
-            <div className="relation-empty">根节点 / 待连接子树</div>
-          )}
-          <label>子节点</label>
-          {children.length ? (
-            children.map((id) => (
-              <div className="relation-row" key={id}>
-                <button onClick={() => focusNode(id)}>
-                  <span className="relation-dot coral" />
-                  {id}
-                  <ChevronRight size={13} />
-                </button>
-                <button
-                  className="icon-button disconnect"
-                  aria-label={`断开 ${id}`}
-                  onClick={() => {
-                    const edge = edges.find(
-                      (e) => e.source === selected.id && e.target === id,
-                    );
-                    if (edge) useGraph.getState().disconnect(edge.id);
-                  }}
-                  disabled={busy}
-                >
-                  <Unplug size={14} />
-                </button>
-              </div>
-            ))
-          ) : (
-            <div className="relation-empty">暂无子节点</div>
-          )}
-          <form
-            className="connect-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const target = connectingTo.startsWith("node-")
-                ? connectingTo
-                : `node-${connectingTo}`;
-              useGraph.getState().connect({
-                source: selected.id,
-                target,
-                sourceHandle: "out",
-                targetHandle: "in",
-              });
-            }}
-          >
-            <input
-              value={connectingTo}
-              onChange={(event) => setConnectingTo(event.target.value)}
-              placeholder="子节点 ID，如 9999"
-              aria-label="连接目标节点"
-            />
-            <button
-              className="icon-button"
-              disabled={busy || !connectingTo}
-              title="连接子节点"
-              aria-label="连接子节点"
-            >
-              <Link2 size={16} />
-            </button>
-          </form>
-        </div>
-        <button
-          className="outline-button import-button"
-          disabled={importing || busy}
-          onClick={() => inputRef.current?.click()}
-        >
-          {importing ? (
-            <LoaderCircle className="spin" size={15} />
-          ) : (
-            <Upload size={15} />
-          )}
-          替换为本地素材
-        </button>
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/*,video/*"
-          hidden
-          onChange={(event) => void handleImport(event.target.files?.[0])}
-        />
-        <p className="local-note">
-          <Database size={12} />
-          素材与图谱仅存于当前浏览器
-        </p>
-      </div>
-      <div className="inspector-foot">
-        <CircleHelp size={14} />
-        拖动连接点，或输入 ID 建立连线
-      </div>
-    </aside>
-  );
-}
+let appCommits = 0;
 
 export function App() {
-  const nodes = useGraph((s) => s.nodes);
-  const edges = useGraph((s) => s.edges);
-  const topology = useGraph((s) => s.topology);
+  // Count committed shell updates, including in production browser measurements.
+  useEffect(() => {
+    appCommits++;
+  });
+  const nodeCount = useGraph((s) => s.nodes.length);
+  const edgeCount = useGraph((s) => s.edges.length);
   const ready = useGraph((s) => s.ready);
   const busy = useGraph((s) => s.busy);
   const overview = useGraph((s) => s.overview);
@@ -681,17 +48,13 @@ export function App() {
   const focusTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
-  const overviewGraph = useMemo(
-    () => (overview ? buildOverview({ nodes, edges }, topology) : null),
-    [overview, nodes, edges, topology],
-  );
 
   useEffect(() => {
     void useGraph.getState().initialize();
   }, []);
   useEffect(() => {
-    if (ready) setDataset(nodes.length);
-  }, [ready, nodes.length]);
+    if (ready) setDataset(nodeCount);
+  }, [ready, nodeCount]);
   useEffect(() => {
     if (notice) {
       const timer = setTimeout(() => {
@@ -713,7 +76,9 @@ export function App() {
 
   const focusNode = useCallback(
     (id: string) => {
-      const node = useGraph.getState().nodes.find((n) => n.id === id);
+      const state = useGraph.getState();
+      const node = selectNode(state, id);
+      const wasOverview = state.overview;
       if (!node) {
         useGraph.setState({
           notice: "未找到该节点，请输入 0 到节点数减 1 的 ID",
@@ -737,14 +102,16 @@ export function App() {
       focusTimer.current = setTimeout(() => {
         const bounds = canvas.current?.getBoundingClientRect();
         const zoom = 0.85;
-        void flow.setViewport(
-          {
-            x: (bounds?.width ?? 900) / 2 - (node.position.x + 108) * zoom,
-            y: (bounds?.height ?? 700) / 2 - (node.position.y + 88) * zoom,
-            zoom,
-          },
-          { duration: 240 },
-        );
+        const target = {
+          x: (bounds?.width ?? 900) / 2 - (node.position.x + 108) * zoom,
+          y: (bounds?.height ?? 700) / 2 - (node.position.y + 88) * zoom,
+          zoom,
+        };
+        const current = flow.getViewport();
+        const distance = Math.hypot(target.x - current.x, target.y - current.y);
+        // A distant animated flight can expose thousands of cards between endpoints.
+        const animate = !wasOverview && distance < Math.max(bounds?.width ?? 900, bounds?.height ?? 700) * 2;
+        void flow.setViewport(target, { duration: animate ? 240 : 0 });
       }, 30);
     },
     [flow],
@@ -833,11 +200,16 @@ export function App() {
   }, [ready, flowReady, flow]);
   useEffect(() => {
     const diagnostics = () => ({
+      appCommits,
+      buildMode: import.meta.env.MODE,
+      culling: useGraph.getState().culling,
+      busy: useGraph.getState().busy,
       count: useGraph.getState().nodes.length,
       edges: useGraph.getState().edges.length,
       renderedNodes: document.querySelectorAll(".react-flow__node").length,
       overview: useGraph.getState().overview,
       saveState: useGraph.getState().saveState,
+      persistenceBlocked: useGraph.getState().persistenceBlocked,
       loadMs: useGraph.getState().loadMs,
       readyMs:
         performance.getEntriesByName("frame-ready")[0]?.startTime ?? null,
@@ -915,7 +287,7 @@ export function App() {
             <button
               key={count}
               aria-label={`${count} 节点数据集`}
-              className={nodes.length === count ? "chosen" : ""}
+              className={nodeCount === count ? "chosen" : ""}
               onClick={() => {
                 setDataset(count);
                 setResetOpen(true);
@@ -924,7 +296,7 @@ export function App() {
             >
               <Database size={14} />
               <span>{count.toLocaleString()} 个节点</span>
-              {nodes.length === count ? (
+              {nodeCount === count ? (
                 <span className="dataset-dot" />
               ) : (
                 <ChevronRight size={12} />
@@ -1008,14 +380,14 @@ export function App() {
           <div className="graph-summary">
             <div>
               <strong data-testid="node-count">
-                {nodes.length.toLocaleString()}
+                {nodeCount.toLocaleString()}
               </strong>
               <span>媒体节点</span>
             </div>
             <i />
             <div>
               <strong data-testid="edge-count">
-                {edges.length.toLocaleString()}
+                {edgeCount.toLocaleString()}
               </strong>
               <span>关联连线</span>
             </div>
@@ -1066,17 +438,8 @@ export function App() {
               data-testid="graph-canvas"
             >
               {ready ? (
-                <ReactFlow<GraphNode>
-                  nodes={overviewGraph?.nodes ?? nodes}
-                  edges={overviewGraph?.edges ?? edges}
-                  nodeTypes={nodeTypes}
-                  defaultEdgeOptions={defaultEdgeOptions}
-                  onlyRenderVisibleElements={culling}
+                <GraphCanvas
                   onNodesChange={handleNodeChanges}
-                  onEdgesChange={
-                    overview ? ignoreChanges : useGraph.getState().onEdgesChange
-                  }
-                  onConnect={useGraph.getState().connect}
                   isValidConnection={validateConnection}
                   onNodeClick={handleNodeClick}
                   onEdgeClick={handleEdgeClick}
@@ -1084,27 +447,7 @@ export function App() {
                   onNodeDragStop={handleDragStop}
                   onMoveEnd={onMoveEnd}
                   onInit={onInit}
-                  defaultViewport={useGraph.getState().viewport}
-                  minZoom={0.03}
-                  maxZoom={1.6}
-                  nodesDraggable={!overview && !busy}
-                  nodesConnectable={!overview && !busy}
-                  deleteKeyCode={
-                    overview || busy ? null : ["Backspace", "Delete"]
-                  }
-                  selectNodesOnDrag={true}
-                  edgesReconnectable={false}
-                  panOnScroll={false}
-                  zoomOnDoubleClick={false}
-                  elevateNodesOnSelect={false}
-                >
-                  <Background
-                    variant={BackgroundVariant.Dots}
-                    color="#c9cec8"
-                    gap={22}
-                    size={1}
-                  />
-                </ReactFlow>
+                />
               ) : (
                 <div className="loading-state">
                   <LoaderCircle className="spin" size={28} />
@@ -1230,7 +573,7 @@ export function App() {
           <div className="stat-line">
             <span>逻辑节点 / 连线</span>
             <b>
-              {nodes.length} / {edges.length}
+              {nodeCount} / {edgeCount}
             </b>
           </div>
           <div className="stat-line">
