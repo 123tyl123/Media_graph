@@ -10,15 +10,13 @@
 
 ```powershell
 cd C:\Users\tyl\Desktop\test
-npm.cmd ci
-npm.cmd run dev
+npm run dev
 ```
 
 打开终端显示的地址，通常为 `http://127.0.0.1:5173/`。如果依赖已经安装，可直接执行最后一条命令。
 
 ```powershell
-npm.cmd run build
-npm.cmd run preview
+npm run dev
 ```
 
 `build` 生成 `dist/` 和约 2 MB 的 `standalone.html`。单文件包含应用、六张示例图片和示例视频，不依赖外部 CDN；正式验收请使用 HTTP 服务，文件页面的访问和存储能力取决于浏览器策略。
